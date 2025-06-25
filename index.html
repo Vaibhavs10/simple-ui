@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HuggingChat | Minimal AI Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .message-stream::after {
+            content: "";
+            width: 8px;
+            height: 20px;
+            background: #3b82f6;
+            display: inline-block;
+            animation: cursor-blink 1s infinite;
+            vertical-align: middle;
+            margin-left: 2px;
+        }
+        
+        @keyframes cursor-blink {
+            0% { opacity: 0; }
+            50% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+        
+        .gradient-bg {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        }
+        
+        .chat-container {
+            height: calc(100vh - 160px);
+        }
+        
+        @media (max-width: 640px) {
+            .chat-container {
+                height: calc(100vh - 140px);
+            }
+        }
+    </style>
+</head>
+<body class="gradient-bg min-h-screen font-sans">
+    <div class="container mx-auto px-4 py-6 max-w-4xl">
+        <!-- Header -->
+        <header class="flex justify-between items-center mb-6">
+            <div class="flex items-center">
+                <img src="https://huggingface.co/front/assets/huggingface_logo-noborder.svg" alt="Hugging Face" class="h-8 mr-3">
+                <h1 class="text-2xl font-bold text-gray-800">HuggingChat</h1>
+            </div>
+            <div id="auth-section">
+                <button id="login-btn" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center">
+                    <i class="fas fa-sign-in-alt mr-2"></i> Login with Hugging Face
+                </button>
+                <div id="user-info" class="hidden items-center">
+                    <img id="user-avatar" class="w-8 h-8 rounded-full mr-2" src="">
+                    <span id="username" class="font-medium text-gray-700"></span>
+                    <button id="logout-btn" class="ml-4 text-gray-500 hover:text-gray-700">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Chat Container -->
+        <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+            <div class="chat-container overflow-y-auto p-4" id="chat-messages">
+                <div class="text-center py-10 text-gray-400" id="empty-state">
+                    <i class="fas fa-comments text-4xl mb-3"></i>
+                    <p class="text-lg">Start a conversation with the AI</p>
+                    <p class="text-sm mt-1">Your messages will appear here</p>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="border-t border-gray-200 p-4 bg-gray-50">
+                <div class="flex items-end">
+                    <div class="flex-grow relative">
+                        <textarea 
+                            id="message-input" 
+                            class="w-full border border-gray-300 rounded-lg px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none" 
+                            placeholder="Type your message..." 
+                            rows="1"
+                            disabled
+                        ></textarea>
+                        <button id="send-btn" class="absolute right-3 bottom-3 text-blue-500 hover:text-blue-600 disabled:text-gray-400" disabled>
+                            <i class="fas fa-paper-plane text-xl"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="mt-3 flex items-center justify-between">
+                    <div class="flex items-center space-x-2">
+                        <label for="model-select" class="text-sm text-gray-600">Model:</label>
+                        <select id="model-select" class="text-sm border border-gray-300 rounded px-2 py-1 bg-white">
+                            <option value="deepseek-ai/DeepSeek-R1-0528">DeepSeek-R1-0528</option>
+                            <option value="meta-llama/Meta-Llama-3-8B-Instruct">Llama 3 8B</option>
+                            <option value="mistralai/Mistral-7B-Instruct-v0.2">Mistral 7B</option>
+                        </select>
+                    </div>
+                    <div class="text-xs text-gray-500">
+                        <span id="token-counter">0 tokens</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { oauthLoginUrl, oauthHandleRedirectIfPresent } from 'https://cdn.jsdelivr.net/npm/@huggingface/hub@2.2.0/+esm';
+        import { InferenceClient } from 'https://cdn.jsdelivr.net/npm/@huggingface/inference@4.0.6/+esm';
+        // DOM Elements
+        const loginBtn = document.getElementById('login-btn');
+        const logoutBtn = document.getElementById('logout-btn');
+        const userInfo = document.getElementById('user-info');
+        const userAvatar = document.getElementById('user-avatar');
+        const username = document.getElementById('username');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const chatMessages = document.getElementById('chat-messages');
+        const emptyState = document.getElementById('empty-state');
+        const modelSelect = document.getElementById('model-select');
+        const tokenCounter = document.getElementById('token-counter');
+        
+        // State
+        let hfClient = null;
+        let currentUser = null;
+        let currentStream = null;
+        let isGenerating = false;
+        let messageCount = 0;
+        
+        // ---- OAuth configuration ----
+        const CLIENT_ID = document.querySelector('meta[name="hf-client-id"]')?.content;
+        const REDIRECT_URI = window.location.origin + window.location.pathname;
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            await processRedirect();
+            await checkAuth();
+            messageInput.disabled = false; // Always enable input
+        });
+        
+        // Event Listeners
+        loginBtn.addEventListener('click', handleLogin);
+        logoutBtn.addEventListener('click', handleLogout);
+        sendBtn.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (!isGenerating) sendMessage();
+            }
+        });
+        
+        messageInput.addEventListener('input', () => {
+            // Auto-resize textarea
+            messageInput.style.height = 'auto';
+            messageInput.style.height = (messageInput.scrollHeight) + 'px';
+            
+            // Enable/disable send button
+            sendBtn.disabled = messageInput.value.trim() === '' || isGenerating;
+        });
+        
+        // Functions
+        async function checkAuth() {
+            try {
+                const token = localStorage.getItem('hf_token');
+                const user = localStorage.getItem('hf_user');
+                
+                if (token && user) {
+                    // Verify token is still valid
+                    const response = await fetch('https://huggingface.co/api/whoami-v2', {
+                        headers: {
+                            'Authorization': `Bearer ${token}`
+                        }
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error('Token expired or invalid');
+                    }
+                    
+                    currentUser = JSON.parse(user);
+                    setupAuthenticatedUI();
+                }
+            } catch (error) {
+                console.error("Auth check failed:", error);
+                handleLogout();
+            }
+        }
+        
+        async function handleLogin() {
+            try {
+                // Redirect user to Hugging Face OAuth page
+                const url = await oauthLoginUrl({
+                    clientId: CLIENT_ID,
+                    redirectUri: REDIRECT_URI,
+                    // default scopes: openid profile; add inference-api so we can run models
+                    scopes: 'openid profile inference-api'
+                });
+                window.location.href = url;
+            } catch (error) {
+                console.error("Login redirect error:", error);
+                alert(`Unable to redirect to Hugging Face login: ${error.message}`);
+            }
+        }
+        
+        function handleLogout() {
+            localStorage.removeItem('hf_token');
+            localStorage.removeItem('hf_user');
+            currentUser = null;
+            hfClient = null;
+            
+            // Reset UI
+            loginBtn.classList.remove('hidden');
+            userInfo.classList.add('hidden');
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+            
+            // Clear chat
+            chatMessages.innerHTML = emptyState.outerHTML;
+            messageCount = 0;
+        }
+        
+        function setupAuthenticatedUI() {
+            try {
+                const token = localStorage.getItem('hf_token');
+                if (!token) throw new Error('No token found');
+                
+                hfClient = new InferenceClient(token);
+                
+                // Update UI
+                loginBtn.classList.add('hidden');
+                userInfo.classList.remove('hidden');
+                userAvatar.src = currentUser.avatar;
+                username.textContent = currentUser.name;
+                messageInput.disabled = false;
+                sendBtn.disabled = messageInput.value.trim() === '';
+                
+                // Scroll to bottom
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            } catch (error) {
+                console.error("Authentication setup failed:", error);
+                handleLogout();
+            }
+        }
+        
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message || isGenerating) return;
+            
+            // Add user message to chat
+            addMessage('user', message);
+            messageInput.value = '';
+            messageInput.style.height = 'auto';
+            sendBtn.disabled = true;
+            
+            // Create loading message for AI
+            const loadingId = addMessage('assistant', '', true);
+            
+            try {
+                isGenerating = true;
+                
+                const token = localStorage.getItem('hf_token');
+                if (!token || !hfClient) {
+                    throw new Error("Not authenticated. Please login first.");
+                }
+                
+                // Initialize client if not already done
+                if (!hfClient) {
+                    hfClient = new InferenceClient(token);
+                }
+                
+                const model = modelSelect.value;
+                // Build chat history for context
+                const history = getConversationHistory().map(msg => ({
+                    role: msg.role,
+                    content: msg.content
+                }));
+                history.push({ role: 'user', content: message });
+
+                const response = await hfClient.chatCompletion({
+                    model,
+                    messages: history,
+                    max_tokens: 1024
+                });
+
+                const assistantMsg = response.choices?.[0]?.message?.content || '[No response]';
+                updateMessage(loadingId, assistantMsg);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                // optional simple token count
+                tokenCounter.textContent = `${assistantMsg.split(/\s+/).length} tokens`;
+                
+            } catch (error) {
+                console.error("Error:", error);
+                updateMessage(loadingId, `Error: ${error.message}`);
+            } finally {
+                isGenerating = false;
+                sendBtn.disabled = false;
+            }
+        }
+        
+        function addMessage(role, content, isLoading = false) {
+            // Hide empty state if first message
+            if (messageCount === 0 && emptyState.parentNode) {
+                chatMessages.removeChild(emptyState);
+            }
+            
+            const messageId = 'msg-' + Date.now();
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `mb-4 flex ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+            
+            const bubbleClass = role === 'user' 
+                ? 'bg-blue-500 text-white rounded-l-xl rounded-tr-xl' 
+                : 'bg-gray-100 text-gray-800 rounded-r-xl rounded-tl-xl';
+            
+            const loadingClass = isLoading ? 'message-stream' : '';
+            
+            messageDiv.innerHTML = `
+                <div class="max-w-[80%]">
+                    <div class="${bubbleClass} px-4 py-3 ${loadingClass}" id="${messageId}">
+                        ${content}
+                    </div>
+                    <div class="text-xs text-gray-500 mt-1 ${role === 'user' ? 'text-right' : 'text-left'}">
+                        ${role === 'user' ? 'You' : 'AI'} • ${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                    </div>
+                </div>
+            `;
+            
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            messageCount++;
+            
+            return messageId;
+        }
+        
+        function updateMessage(id, content) {
+            const element = document.getElementById(id);
+            if (element) {
+                element.innerHTML = content;
+                
+                // Remove streaming cursor if present
+                if (element.classList.contains('message-stream')) {
+                    element.classList.remove('message-stream');
+                }
+            }
+        }
+        
+        function getConversationHistory() {
+            const messages = [];
+            const messageElements = chatMessages.querySelectorAll('[id^="msg-"]');
+            
+            messageElements.forEach(el => {
+                const bubble = el.closest('.mb-4');
+                const role = bubble.classList.contains('justify-end') ? 'user' : 'assistant';
+                const timeElement = bubble.querySelector('.text-xs');
+                const timeText = timeElement ? timeElement.textContent : '';
+                
+                messages.push({
+                    role: role,
+                    content: el.textContent
+                });
+            });
+            
+            return messages;
+        }
+        
+        // Handle OAuth redirect result
+        async function processRedirect() {
+            try {
+                const oauthResult = await oauthHandleRedirectIfPresent({
+                    clientId: CLIENT_ID,
+                    redirectUri: REDIRECT_URI
+                });
+                if (oauthResult) {
+                    const token = oauthResult.accessToken;
+                    const info = oauthResult.userInfo || {};
+                    const user = {
+                        name: info.name || info.preferred_username || 'Hugging Face User',
+                        avatar: info.picture || 'https://huggingface.co/front/assets/huggingface_logo-noborder.svg'
+                    };
+                    localStorage.setItem('hf_token', token);
+                    localStorage.setItem('hf_user', JSON.stringify(user));
+                    currentUser = user;
+                    hfClient = new InferenceClient(token);
+                    setupAuthenticatedUI();
+                    if (messageCount === 0) {
+                        addMessage('assistant', `Hello ${user.name}! How can I help you today?`);
+                    }
+                }
+            } catch (err) {
+                console.error('OAuth processing failed:', err);
+            }
+        }
+    </script>
+<p style="border-radius: 8px; text-align: center; font-size: 12px; color: #fff; margin-top: 16px;position: fixed; left: 8px; bottom: 8px; z-index: 10; background: rgba(0, 0, 0, 0.8); padding: 4px 8px;">Made with <img src="https://enzostvs-deepsite.hf.space/logo.svg" alt="DeepSite Logo" style="width: 16px; height: 16px; vertical-align: middle;display:inline-block;margin-right:3px;filter:brightness(0) invert(1);"><a href="https://enzostvs-deepsite.hf.space" style="color: #fff;text-decoration: underline;" target="_blank" >DeepSite</a> - 🧬 <a href="https://enzostvs-deepsite.hf.space?remix=reach-vb/hugging-chat" style="color: #fff;text-decoration: underline;" target="_blank" >Remix</a></p></body>
+</html>
